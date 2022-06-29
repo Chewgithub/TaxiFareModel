@@ -1,44 +1,57 @@
-from TaxiFareModel.encoders import TimeFeaturesEncoder
-from TaxiFareModel.encoders import DistanceTransformer
+from TaxiFareModel.encoders import TimeFeaturesEncoder,DistanceTransformer, distance_to_center
 from TaxiFareModel.utils import compute_rmse
-from TaxiFareModel.data import get_data
-from TaxiFareModel.data import clean_data
+from TaxiFareModel.data import get_data,clean_data
+from TaxiFareModel.gcp import storage_upload
+from TaxiFareModel.params import MLFLOW_URI,experiment_name, BUCKET_NAME,BUCKET_TRAIN_DATA_PATH
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import StandardScaler,OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression,Ridge
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor,GradientBoostingRegressor
 from sklearn.model_selection import cross_validate
 from sklearn.metrics import SCORERS
 
 from memoized_property import memoized_property
 from  mlflow.tracking import MlflowClient
 import mlflow
+import pandas as pd
+from google.cloud import storage
 
 import joblib
 
 
 class Trainer():
-    def __init__(self, X, y, model):
+    def __init__(self, X, y, model, model_name):
         """
             X: pandas DataFrame
             y: pandas Series
         """
-        self.experiment_name="[SG] [Pasir Ris] [Chew Eng Yong] TaxiFarePrediction v1"
+        self.experiment_name=experiment_name
         self.model=model
+        self.model_name=model_name
         self.pipeline = self.set_pipeline()
         self.X = X
         self.y = y
 
-        MLFLOW_URI = "https://mlflow.lewagon.ai/"
-        self.mlflow_log_param('Model', self.model)
+        #ML flow paramters and result logging
+        self.MLFLOW_URI=MLFLOW_URI
+        self.mlflow_log_param('Model', model_name)
+        self.mlflow_log_param('Encoders', 'distance_to_center')
+        self.mlflow_log_param('nrows', nrows)
         self.mlflow_log_metric('RMSE', self.cross_v())
-        self.save_model()
+
+        # gcloud model storage
+        self.STORAGE_LOCATION = f'models/taxifare/{model_name}model.joblib'
+        self.BUCKET_NAME = BUCKET_NAME
+
 
     def set_pipeline(self):
         """defines the pipeline as a class attribute"""
+        distc_pipe = Pipeline([
+            ('dist_trans', distance_to_center()),
+            ('stdscaler', StandardScaler())])
+
         dist_pipe = Pipeline([
             ('dist_trans', DistanceTransformer()),
             ('stdscaler', StandardScaler())])
@@ -48,6 +61,7 @@ class Trainer():
             ('ohe', OneHotEncoder(handle_unknown='ignore'))])
 
         preproc_pipe = ColumnTransformer([
+            ('distance_center', distc_pipe, ["pickup_latitude", "pickup_longitude", 'dropoff_latitude', 'dropoff_longitude']),
             ('distance', dist_pipe, ["pickup_latitude", "pickup_longitude", 'dropoff_latitude', 'dropoff_longitude']),
             ('time', time_pipe, ['pickup_datetime'])], remainder="drop")
         pipe = Pipeline([('preproc', preproc_pipe),
@@ -66,15 +80,18 @@ class Trainer():
         return print(f'RMSE: {rmse}')
 
     def cross_v(self):
+        '''
+        Perform 5 fold cross validation
+        '''
         score=cross_validate(self.pipeline, self.X,self.y,cv=5,
                              scoring=['neg_root_mean_squared_error'])
-        return score["test_neg_root_mean_squared_error"].mean()
+        score=abs(score["test_neg_root_mean_squared_error"].mean())
 
+        return score
 
     def save_model(self):
         """ Save the trained model into a model.joblib file """
-        return joblib.dump(self.run , f'{self.model}model')
-
+        return joblib.dump(self.pipeline , f'{self.model_name}model.joblib')
 
 
     @memoized_property
@@ -102,19 +119,26 @@ class Trainer():
 
 
 if __name__ == "__main__":
-    df = clean_data(get_data()) # get data #clean_data
+    nrows=100000
+    df = pd.read_csv(f"gs://{BUCKET_NAME}/{BUCKET_TRAIN_DATA_PATH}", nrows=nrows)
+
+    df = clean_data(df) # get data #clean_data
     y = df["fare_amount"]   # set X and y
     X = df.drop("fare_amount", axis=1)
 
 
-
-    all_model=['linear','RandomForestRegressor','Ridge']
-    for model in all_model:
+    small=['GradientBoost']
+    all_model=['linear','RandomForestRegressor','Ridge','GradientBoost']
+    for model in small:
         if model == 'linear':
-            trainer = Trainer(X, y, LinearRegression()).cross_v()
-
+            trainer=Trainer(X, y, LinearRegression(),model)
         if model == 'RandomForestRegressor':
-            trainer = Trainer(X, y, RandomForestRegressor()).cross_v()
-
+            trainer = Trainer(X, y, RandomForestRegressor(),model)
         if model == 'Ridge':
-            trainer = Trainer(X, y, Ridge()).cross_v()
+            trainer = Trainer(X, y, Ridge(),model)
+        if model == 'GradientBoost':
+            trainer = Trainer(X, y, GradientBoostingRegressor(),model)
+        trainer.run()
+        trainer.save_model()
+        trainer.cross_v()
+        storage_upload(model,rm=False)

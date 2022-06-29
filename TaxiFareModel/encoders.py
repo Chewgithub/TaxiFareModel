@@ -1,6 +1,7 @@
 from sklearn.base import BaseEstimator, TransformerMixin
 import pandas as pd
 from TaxiFareModel.utils import haversine_vectorized
+from TaxiFareModel.utils import haversine_distance
 
 class TimeFeaturesEncoder(BaseEstimator, TransformerMixin):
     """
@@ -56,3 +57,36 @@ class DistanceTransformer(BaseEstimator, TransformerMixin):
             end_lon=self.end_lon
         )
         return X_[['distance']]
+
+class distance_to_center(BaseEstimator, TransformerMixin):
+    """
+        Computes the distance between pickup point with center of new york city.
+        After some testing, data shows that taxifare is correlated with how close
+        the pickup point to the center of city.
+        Returns a copy of the DataFrame X with only one column: 'distance_to_center'.
+    """
+
+    def __init__(self,
+                 start_lat="pickup_latitude",
+                 start_lon="pickup_longitude",
+                 end_lat="dropoff_latitude",
+                 end_lon="dropoff_longitude"):
+        self.start_lat = start_lat
+        self.start_lon = start_lon
+        self.end_lat = end_lat
+        self.end_lon = end_lon
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        assert isinstance(X, pd.DataFrame)
+        X_ = X.copy()
+
+        nyc_center = (40.7141667, -74.0063889)
+        X_["nyc_lat"], X_["nyc_lng"] = nyc_center[0], nyc_center[1]
+        args =  dict(start_lat="nyc_lat", start_lon="nyc_lng",
+             end_lat="pickup_latitude", end_lon="pickup_longitude")
+
+        X_["distance_to_center"] = haversine_distance(X_, **args)
+        return X_[['distance_to_center']]
